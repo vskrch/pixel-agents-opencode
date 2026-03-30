@@ -12,6 +12,7 @@ import {
   sendExistingAgents,
   sendLayout,
 } from './agentManager.js';
+import type { AgentType } from './agentTypes.js';
 import type { LoadedAssets } from './assetLoader.js';
 import {
   loadCharacterSprites,

@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { removeAgent } from './agentManager.js';
+import { detectAgentTypeFromFile, GLOBAL_AGENT_ROOTS } from './agentTypes.js';
 import {
   CLEAR_IDLE_THRESHOLD_MS,
   DISMISSED_COOLDOWN_MS,
@@ -407,10 +408,12 @@ function adoptTerminalForFile(
   persistAgents: () => void,
 ): void {
   const id = nextAgentIdRef.current++;
+  const detectedType = detectAgentTypeFromFile(path.basename(jsonlFile));
   const agent: AgentState = {
     id,
     terminalRef: terminal,
     isExternal: false,
+    agentType: detectedType,
     projectDir,
     jsonlFile,
     fileOffset: 0,
@@ -436,7 +439,7 @@ function adoptTerminalForFile(
   console.log(
     `[Pixel Agents] Agent ${id}: adopted terminal "${terminal.name}" for ${path.basename(jsonlFile)}`,
   );
-  webview?.postMessage({ type: 'agentCreated', id });
+  webview?.postMessage({ type: 'agentCreated', id, agentType: agent.agentType });
 
   startFileWatching(
     id,
@@ -479,6 +482,7 @@ function adoptExternalSession(
     id,
     terminalRef: undefined,
     isExternal: true,
+    agentType: detectAgentTypeFromFile(path.basename(jsonlFile)),
     projectDir,
     jsonlFile,
     fileOffset,
@@ -504,7 +508,13 @@ function adoptExternalSession(
   console.log(
     `[Pixel Agents] Agent ${id}: detected external session ${path.basename(jsonlFile)}${folderName ? ` (${folderName})` : ''}`,
   );
-  webview?.postMessage({ type: 'agentCreated', id, isExternal: true, folderName });
+  webview?.postMessage({
+    type: 'agentCreated',
+    id,
+    isExternal: true,
+    folderName,
+    agentType: agent.agentType,
+  });
 
   startFileWatching(
     id,
@@ -711,7 +721,7 @@ function folderNameFromProjectDir(dirName: string): string {
   return parts[parts.length - 1] || dirName;
 }
 
-/** Scan ALL ~/.claude/projects/ directories for active sessions (global discovery). */
+/** Scan known agent session roots for active sessions (global discovery). */
 function scanGlobalProjectDirs(
   knownJsonlFiles: Set<string>,
   nextAgentIdRef: { current: number },
@@ -723,64 +733,67 @@ function scanGlobalProjectDirs(
   webview: vscode.Webview | undefined,
   persistAgents: () => void,
 ): void {
-  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-  let dirs: fs.Dirent[];
-  try {
-    dirs = fs.readdirSync(projectsRoot, { withFileTypes: true }).filter((d) => d.isDirectory());
-  } catch {
-    return;
-  }
-
   const now = Date.now();
-  for (const dir of dirs) {
-    const dirPath = path.join(projectsRoot, dir.name);
-    // Skip directories already tracked by workspace scanning
-    if (trackedProjectDirs.has(dirPath)) continue;
-
-    let files: string[];
+  for (const agentRoot of GLOBAL_AGENT_ROOTS) {
+    let dirs: fs.Dirent[] = [];
     try {
-      files = fs
-        .readdirSync(dirPath)
-        .filter((f) => f.endsWith('.jsonl'))
-        .map((f) => path.join(dirPath, f));
+      dirs = fs.readdirSync(agentRoot.root, { withFileTypes: true }).filter((d) => d.isDirectory());
     } catch {
-      continue;
+      dirs = [];
     }
 
-    for (const file of files) {
-      if (knownJsonlFiles.has(file)) continue;
-      let tracked = false;
-      for (const agent of agents.values()) {
-        if (agent.jsonlFile === file) {
-          tracked = true;
-          break;
-        }
-      }
-      if (tracked) continue;
-      // Activity filter: >3KB AND modified within 10 minutes
+    const candidateDirs = dirs.map((d) => path.join(agentRoot.root, d.name));
+    if (candidateDirs.length === 0) {
+      candidateDirs.push(agentRoot.root);
+    }
+
+    for (const dirPath of candidateDirs) {
+      if (trackedProjectDirs.has(dirPath)) continue;
+
+      let files: string[];
       try {
-        const stat = fs.statSync(file);
-        if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
-        if (now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) continue;
+        files = fs
+          .readdirSync(dirPath)
+          .filter((f) => f.endsWith('.jsonl') || f.endsWith('.log') || f.endsWith('.json'))
+          .map((f) => path.join(dirPath, f));
       } catch {
         continue;
       }
 
-      const folderName = folderNameFromProjectDir(dir.name);
-      knownJsonlFiles.add(file);
-      adoptExternalSession(
-        file,
-        dirPath,
-        nextAgentIdRef,
-        agents,
-        fileWatchers,
-        pollingTimers,
-        waitingTimers,
-        permissionTimers,
-        webview,
-        persistAgents,
-        folderName,
-      );
+      for (const file of files) {
+        if (knownJsonlFiles.has(file)) continue;
+        let tracked = false;
+        for (const agent of agents.values()) {
+          if (agent.jsonlFile === file) {
+            tracked = true;
+            break;
+          }
+        }
+        if (tracked) continue;
+        try {
+          const stat = fs.statSync(file);
+          if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
+          if (now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) continue;
+        } catch {
+          continue;
+        }
+
+        const folderName = path.basename(dirPath);
+        knownJsonlFiles.add(file);
+        adoptExternalSession(
+          file,
+          dirPath,
+          nextAgentIdRef,
+          agents,
+          fileWatchers,
+          pollingTimers,
+          waitingTimers,
+          permissionTimers,
+          webview,
+          persistAgents,
+          folderName,
+        );
+      }
     }
   }
 }
