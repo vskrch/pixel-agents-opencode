@@ -122,7 +122,7 @@ export function getSessionDir(agentType: AgentType, cwd: string): string {
       const dirName = cwd.replace(/[^a-zA-Z0-9-]/g, '-');
       return path.join(home, '.claude', 'projects', dirName);
     case 'opencode':
-      return path.join(home, '.opencode', 'sessions');
+      return path.join(home, '.opencode', 'messages');
     case 'antigravity':
       return path.join(home, '.antigravity', 'logs');
     case 'cursor':
@@ -132,4 +132,9 @@ export function getSessionDir(agentType: AgentType, cwd: string): string {
     default:
       return path.join(home, '.agents', 'sessions');
   }
+}
+
+export function getOpenCodeSessionIdFromDir(sessionDir: string): string | null {
+  const match = sessionDir.match(/ses_[a-z0-9]+$/i);
+  return match ? match[0] : null;
 }

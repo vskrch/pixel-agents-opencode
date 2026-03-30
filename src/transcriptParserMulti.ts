@@ -89,6 +89,14 @@ export function parseOpenCodeTranscriptLine(line: string): ParsedTranscriptRecor
   try {
     const record = JSON.parse(line);
 
+    if (record.role === 'user') {
+      return { type: 'thinking' };
+    }
+
+    if (record.role === 'assistant') {
+      return { type: 'turn_end' };
+    }
+
     // OpenCode format: similar structure but may have different field names
     if (record.event === 'tool_start') {
       return {
@@ -168,6 +176,25 @@ export function parseAntigravityTranscriptLine(line: string): ParsedTranscriptRe
 
     return null;
   } catch {
+    if (line.includes('Requesting planner with')) {
+      return {
+        type: 'tool_use',
+        toolUse: {
+          toolId: 'planner',
+          toolName: 'planner',
+          input: {},
+        },
+      };
+    }
+
+    if (line.includes('streamGenerateContent')) {
+      return { type: 'thinking' };
+    }
+
+    if (line.includes('agent executor error') || line.includes('internal error')) {
+      return { type: 'turn_end' };
+    }
+
     return null;
   }
 }

@@ -16,6 +16,12 @@ import {
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
   PROJECT_SCAN_INTERVAL_MS,
 } from './constants.js';
+import {
+  formatOpenCodeToolStatus,
+  getLatestPartId,
+  getNewToolPartsSince,
+  openCodeDbExists,
+} from './opencodeDatabase.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
 import { processTranscriptLine } from './transcriptParser.js';
 import type { AgentState } from './types.js';
@@ -67,6 +73,7 @@ export function startFileWatching(
       return;
     }
     const agent = agents.get(agentId)!;
+    maybeAdvanceOpenCodeSession(agent);
     const prevOffset = agent.fileOffset;
     readNewLines(agentId, agents, waitingTimers, permissionTimers, webview);
 
@@ -153,6 +160,12 @@ export function readNewLines(
 ): void {
   const agent = agents.get(agentId);
   if (!agent) return;
+
+  if (agent.agentType === 'opencode') {
+    readOpenCodeMessage(agentId, agent, agents, waitingTimers, permissionTimers, webview);
+    return;
+  }
+
   try {
     const stat = fs.statSync(agent.jsonlFile);
     if (stat.size <= agent.fileOffset) return;
@@ -189,6 +202,128 @@ export function readNewLines(
   } catch (e) {
     console.log(`[Pixel Agents] Read error for agent ${agentId}: ${e}`);
   }
+}
+
+function readOpenCodeMessage(
+  agentId: number,
+  agent: AgentState,
+  agents: Map<number, AgentState>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+  webview: vscode.Webview | undefined,
+): void {
+  if (!openCodeDbExists()) {
+    console.log(`[Pixel Agents] OpenCode database not found for agent ${agentId}`);
+    return;
+  }
+
+  try {
+    const sessionId = extractSessionIdFromPath(agent.jsonlFile);
+    if (!sessionId) {
+      console.log(`[Pixel Agents] Could not extract session ID from ${agent.jsonlFile}`);
+      return;
+    }
+
+    const lastPolledTime = agent.fileOffset || 0;
+    const newParts = getNewToolPartsSince(sessionId, lastPolledTime);
+
+    if (newParts.length === 0) return;
+
+    agent.lastDataAt = Date.now();
+    agent.linesProcessed += newParts.length;
+
+    cancelWaitingTimer(agentId, waitingTimers);
+    cancelPermissionTimer(agentId, permissionTimers);
+
+    if (agent.permissionSent) {
+      agent.permissionSent = false;
+      webview?.postMessage({ type: 'agentToolPermissionClear', id: agentId });
+    }
+
+    for (const part of newParts) {
+      agent.fileOffset = part.time_created;
+
+      if (part.status === 'running' || part.status === 'pending') {
+        const status = formatOpenCodeToolStatus(part.toolName, part.input);
+        console.log(
+          `[Pixel Agents] OpenCode agent ${agentId} tool start: ${part.callID} ${status}`,
+        );
+
+        agent.activeToolIds.add(part.callID);
+        agent.activeToolStatuses.set(part.callID, status);
+        agent.activeToolNames.set(part.callID, part.toolName);
+
+        webview?.postMessage({
+          type: 'agentToolStart',
+          id: agentId,
+          toolId: part.callID,
+          status,
+        });
+
+        webview?.postMessage({
+          type: 'agentStatus',
+          id: agentId,
+          status: 'active',
+        });
+      } else if (part.status === 'completed' || part.status === 'error') {
+        console.log(`[Pixel Agents] OpenCode agent ${agentId} tool done: ${part.callID}`);
+
+        agent.activeToolIds.delete(part.callID);
+        agent.activeToolStatuses.delete(part.callID);
+        agent.activeToolNames.delete(part.callID);
+
+        setTimeout(() => {
+          webview?.postMessage({
+            type: 'agentToolDone',
+            id: agentId,
+            toolId: part.callID,
+          });
+        }, 300);
+
+        if (agent.activeToolIds.size === 0) {
+          webview?.postMessage({
+            type: 'agentStatus',
+            id: agentId,
+            status: 'waiting',
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[Pixel Agents] OpenCode read error for agent ${agentId}: ${e}`);
+  }
+}
+
+function extractSessionIdFromPath(filePath: string): string | null {
+  const match = filePath.match(/ses_[a-z0-9]+/i);
+  return match ? match[0] : null;
+}
+
+function getLatestOpenCodeMessage(sessionDir: string): string | null {
+  try {
+    const files = fs
+      .readdirSync(sessionDir)
+      .filter((f) => /^msg_[a-z0-9]+\.json$/i.test(f))
+      .map((f) => path.join(sessionDir, f));
+    if (files.length === 0) return null;
+    files.sort((a, b) => {
+      const aTime = fs.statSync(a).mtimeMs;
+      const bTime = fs.statSync(b).mtimeMs;
+      return bTime - aTime;
+    });
+    return files[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function maybeAdvanceOpenCodeSession(agent: AgentState): void {
+  if (agent.agentType !== 'opencode') return;
+  const latest = getLatestOpenCodeMessage(agent.projectDir);
+  if (!latest || latest === agent.jsonlFile) return;
+  agent.jsonlFile = latest;
+  agent.fileOffset = 0;
+  agent.lineBuffer = '';
 }
 
 // Track all project directories to scan (supports multi-root workspaces)
@@ -470,19 +605,25 @@ function adoptExternalSession(
   folderName?: string,
 ): void {
   const id = nextAgentIdRef.current++;
-  // Skip to end of file -- only show live activity going forward, not replay history
+  const agentType = detectAgentTypeFromFile(path.basename(jsonlFile));
+
   let fileOffset = 0;
-  try {
-    const stat = fs.statSync(jsonlFile);
-    fileOffset = stat.size;
-  } catch {
-    /* start from beginning if stat fails */
+  if (agentType === 'opencode') {
+    fileOffset = Date.now();
+  } else {
+    try {
+      const stat = fs.statSync(jsonlFile);
+      fileOffset = stat.size;
+    } catch {
+      /* start from beginning if stat fails */
+    }
   }
+
   const agent: AgentState = {
     id,
     terminalRef: undefined,
     isExternal: true,
-    agentType: detectAgentTypeFromFile(path.basename(jsonlFile)),
+    agentType,
     projectDir,
     jsonlFile,
     fileOffset,
@@ -563,7 +704,19 @@ export function startExternalSessionScanning(
         persistAgents,
       );
     }
-    // If "Watch All Sessions" is ON, also scan all global project dirs
+    // Always scan non-Claude global agent roots; Claude global scanning stays behind the toggle.
+    scanGlobalProjectDirs(
+      knownJsonlFiles,
+      nextAgentIdRef,
+      agents,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+      webview,
+      persistAgents,
+      false,
+    );
     if (watchAllSessionsRef?.current) {
       scanGlobalProjectDirs(
         knownJsonlFiles,
@@ -575,6 +728,7 @@ export function startExternalSessionScanning(
         permissionTimers,
         webview,
         persistAgents,
+        true,
       );
     }
   }, EXTERNAL_SCAN_INTERVAL_MS);
@@ -721,6 +875,83 @@ function folderNameFromProjectDir(dirName: string): string {
   return parts[parts.length - 1] || dirName;
 }
 
+function collectAntigravityLogs(rootDir: string): string[] {
+  const results: string[] = [];
+  try {
+    const sessionDirs = fs
+      .readdirSync(rootDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .sort((a, b) => b.name.localeCompare(a.name));
+    const latestSession = sessionDirs[0];
+    if (!latestSession) return results;
+    const targetSessions = [latestSession];
+    for (const sessionDir of targetSessions) {
+      const exthostRoot = path.join(rootDir, sessionDir.name);
+      const windowDirs = fs
+        .readdirSync(exthostRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory());
+      for (const windowDir of windowDirs) {
+        const logFile = path.join(
+          exthostRoot,
+          windowDir.name,
+          'exthost',
+          'google.antigravity',
+          'Antigravity.log',
+        );
+        if (fs.existsSync(logFile)) {
+          results.push(logFile);
+        }
+      }
+    }
+  } catch {
+    return results;
+  }
+  return results;
+}
+
+function collectSessionCandidates(
+  agentType: string,
+  rootDir: string,
+): Array<{ file: string; sessionDir: string; folderName: string }> {
+  if (agentType === 'opencode') {
+    const candidates: Array<{ file: string; sessionDir: string; folderName: string }> = [];
+    try {
+      const sessionDirs = fs
+        .readdirSync(rootDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory());
+      for (const sessionDir of sessionDirs) {
+        const absSessionDir = path.join(rootDir, sessionDir.name);
+        const latest = getLatestOpenCodeMessage(absSessionDir);
+        if (!latest) continue;
+        candidates.push({ file: latest, sessionDir: absSessionDir, folderName: sessionDir.name });
+      }
+    } catch {
+      return [];
+    }
+    return candidates;
+  }
+
+  if (agentType === 'antigravity') {
+    return collectAntigravityLogs(rootDir).map((file) => ({
+      file,
+      sessionDir: path.dirname(path.dirname(path.dirname(path.dirname(file)))),
+      folderName: path.basename(path.dirname(path.dirname(path.dirname(path.dirname(file))))),
+    }));
+  }
+
+  const files = fs.existsSync(rootDir)
+    ? fs
+        .readdirSync(rootDir)
+        .filter((f) => f.endsWith('.jsonl') || f.endsWith('.log') || f.endsWith('.json'))
+        .map((f) => ({
+          file: path.join(rootDir, f),
+          sessionDir: rootDir,
+          folderName: path.basename(rootDir),
+        }))
+    : [];
+  return files;
+}
+
 /** Scan known agent session roots for active sessions (global discovery). */
 function scanGlobalProjectDirs(
   knownJsonlFiles: Set<string>,
@@ -732,68 +963,61 @@ function scanGlobalProjectDirs(
   permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
   webview: vscode.Webview | undefined,
   persistAgents: () => void,
+  includeClaude = false,
 ): void {
   const now = Date.now();
   for (const agentRoot of GLOBAL_AGENT_ROOTS) {
-    let dirs: fs.Dirent[] = [];
-    try {
-      dirs = fs.readdirSync(agentRoot.root, { withFileTypes: true }).filter((d) => d.isDirectory());
-    } catch {
-      dirs = [];
-    }
-
-    const candidateDirs = dirs.map((d) => path.join(agentRoot.root, d.name));
-    if (candidateDirs.length === 0) {
-      candidateDirs.push(agentRoot.root);
-    }
-
-    for (const dirPath of candidateDirs) {
+    if (!includeClaude && agentRoot.type === 'claude') continue;
+    const candidates = collectSessionCandidates(agentRoot.type, agentRoot.root);
+    for (const candidate of candidates) {
+      const file = candidate.file;
+      const dirPath = candidate.sessionDir;
       if (trackedProjectDirs.has(dirPath)) continue;
 
-      let files: string[];
+      if (agentRoot.type === 'opencode') {
+        const existingSession = [...agents.values()].some(
+          (agent) => agent.agentType === 'opencode' && agent.projectDir === dirPath,
+        );
+        if (existingSession) continue;
+      }
+
+      if (knownJsonlFiles.has(file)) continue;
+      let tracked = false;
+      for (const agent of agents.values()) {
+        if (agent.jsonlFile === file) {
+          tracked = true;
+          break;
+        }
+      }
+      if (tracked) continue;
       try {
-        files = fs
-          .readdirSync(dirPath)
-          .filter((f) => f.endsWith('.jsonl') || f.endsWith('.log') || f.endsWith('.json'))
-          .map((f) => path.join(dirPath, f));
+        const stat = fs.statSync(file);
+        if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
+        if (agentRoot.type === 'claude' && now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) {
+          continue;
+        }
+        if (agentRoot.type === 'antigravity' && now - stat.mtimeMs > 24 * 60 * 60 * 1000) {
+          continue;
+        }
       } catch {
         continue;
       }
 
-      for (const file of files) {
-        if (knownJsonlFiles.has(file)) continue;
-        let tracked = false;
-        for (const agent of agents.values()) {
-          if (agent.jsonlFile === file) {
-            tracked = true;
-            break;
-          }
-        }
-        if (tracked) continue;
-        try {
-          const stat = fs.statSync(file);
-          if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
-          if (now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) continue;
-        } catch {
-          continue;
-        }
-
-        const folderName = path.basename(dirPath);
-        knownJsonlFiles.add(file);
-        adoptExternalSession(
-          file,
-          dirPath,
-          nextAgentIdRef,
-          agents,
-          fileWatchers,
-          pollingTimers,
-          waitingTimers,
-          permissionTimers,
-          webview,
-          persistAgents,
-          folderName,
-        );
-      }
+      const folderName = candidate.folderName;
+      knownJsonlFiles.add(file);
+      adoptExternalSession(
+        file,
+        dirPath,
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        webview,
+        persistAgents,
+        folderName,
+      );
     }
   }
 }
@@ -820,14 +1044,17 @@ export function startStaleExternalAgentCheck(
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
 
-      // Only despawn if the JSONL file has been deleted from disk.
-      // Inactive external agents stay alive so they can resume when
-      // the session continues (e.g., claude --resume).
+      if (agent.agentType === 'opencode') {
+        if (!openCodeDbExists()) {
+          toRemove.push(id);
+          continue;
+        }
+        continue;
+      }
+
       try {
         fs.statSync(agent.jsonlFile);
-        // File still exists — keep the agent alive regardless of mtime
       } catch {
-        // File deleted — remove agent
         toRemove.push(id);
       }
     }
