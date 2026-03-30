@@ -20,6 +20,7 @@ import {
   formatOpenCodeToolStatus,
   getLatestPartId,
   getNewToolPartsSince,
+  getOpenCodeSessions,
   openCodeDbExists,
 } from './opencodeDatabase.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
@@ -916,14 +917,14 @@ function collectSessionCandidates(
   if (agentType === 'opencode') {
     const candidates: Array<{ file: string; sessionDir: string; folderName: string }> = [];
     try {
-      const sessionDirs = fs
-        .readdirSync(rootDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory());
-      for (const sessionDir of sessionDirs) {
-        const absSessionDir = path.join(rootDir, sessionDir.name);
-        const latest = getLatestOpenCodeMessage(absSessionDir);
-        if (!latest) continue;
-        candidates.push({ file: latest, sessionDir: absSessionDir, folderName: sessionDir.name });
+      const sessions = getOpenCodeSessions();
+      for (const session of sessions) {
+        const fakeFile = path.join(rootDir, session.id, 'session.json');
+        candidates.push({
+          file: fakeFile,
+          sessionDir: path.join(rootDir, session.id),
+          folderName: session.id,
+        });
       }
     } catch {
       return [];
@@ -990,17 +991,20 @@ function scanGlobalProjectDirs(
         }
       }
       if (tracked) continue;
-      try {
-        const stat = fs.statSync(file);
-        if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
-        if (agentRoot.type === 'claude' && now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) {
+
+      if (agentRoot.type !== 'opencode') {
+        try {
+          const stat = fs.statSync(file);
+          if (stat.size < GLOBAL_SCAN_ACTIVE_MIN_SIZE) continue;
+          if (agentRoot.type === 'claude' && now - stat.mtimeMs > GLOBAL_SCAN_ACTIVE_MAX_AGE_MS) {
+            continue;
+          }
+          if (agentRoot.type === 'antigravity' && now - stat.mtimeMs > 24 * 60 * 60 * 1000) {
+            continue;
+          }
+        } catch {
           continue;
         }
-        if (agentRoot.type === 'antigravity' && now - stat.mtimeMs > 24 * 60 * 60 * 1000) {
-          continue;
-        }
-      } catch {
-        continue;
       }
 
       const folderName = candidate.folderName;
