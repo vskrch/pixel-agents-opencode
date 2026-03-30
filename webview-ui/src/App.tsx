@@ -144,6 +144,7 @@ function App() {
     selectedAgent,
     agentTools,
     agentStatuses,
+    agentTypes,
     subagentTools,
     subagentCharacters,
     layoutReady,
@@ -414,6 +415,7 @@ function App() {
           selectedAgent={selectedAgent}
           agentTools={agentTools}
           agentStatuses={agentStatuses}
+          agentTypes={agentTypes}
           subagentTools={subagentTools}
           onSelectAgent={handleSelectAgent}
         />

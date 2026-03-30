@@ -11,7 +11,7 @@
   "icon": "icon.png",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.105.0"
+    "vscode": "^1.95.0"
   },
   "categories": [
     "Other"
@@ -74,7 +74,7 @@
     "@playwright/test": "^1.58.2",
     "@types/node": "25.x",
     "@types/pngjs": "^6.0.5",
-    "@types/vscode": "^1.105.0",
+    "@types/vscode": "^1.95.0",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.27.2",
     "eslint": "^10.0.3",

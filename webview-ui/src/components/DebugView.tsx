@@ -20,6 +20,7 @@ interface DebugViewProps {
   selectedAgent: number | null;
   agentTools: Record<number, ToolActivity[]>;
   agentStatuses: Record<number, string>;
+  agentTypes: Record<number, string>;
   subagentTools: Record<number, Record<string, ToolActivity[]>>;
   onSelectAgent: (id: number) => void;
 }
@@ -78,6 +79,7 @@ export function DebugView({
   selectedAgent,
   agentTools,
   agentStatuses,
+  agentTypes,
   subagentTools,
   onSelectAgent,
 }: DebugViewProps) {
@@ -113,6 +115,7 @@ export function DebugView({
     const tools = agentTools[id] || [];
     const subs = subagentTools[id] || {};
     const status = agentStatuses[id];
+    const agentType = agentTypes[id] || 'unknown';
     const hasActiveTools = tools.some((t) => !t.done);
     const diag = diagnostics[id];
     return (
@@ -141,6 +144,9 @@ export function DebugView({
           >
             Agent #{id}
           </button>
+          <span style={{ fontSize: '16px', opacity: 0.7, marginLeft: 6, alignSelf: 'center' }}>
+            {agentType}
+          </span>
           <button
             onClick={() => vscode.postMessage({ type: 'closeAgent', id })}
             style={{

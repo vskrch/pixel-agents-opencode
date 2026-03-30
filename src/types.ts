@@ -1,11 +1,15 @@
 import type * as vscode from 'vscode';
 
+import type { AgentType } from './agentTypes.js';
+
 export interface AgentState {
   id: number;
   /** Terminal reference — undefined for extension panel sessions */
   terminalRef?: vscode.Terminal;
   /** Whether this agent was detected from an external source (VS Code extension panel, etc.) */
   isExternal: boolean;
+  /** Type of agent (claude, opencode, antigravity, etc.) */
+  agentType: AgentType;
   projectDir: string;
   jsonlFile: string;
   fileOffset: number;
@@ -35,6 +39,8 @@ export interface PersistedAgent {
   terminalName: string;
   /** Whether this agent was detected from an external source */
   isExternal?: boolean;
+  /** Type of agent */
+  agentType: AgentType;
   jsonlFile: string;
   projectDir: string;
   /** Workspace folder name (only set for multi-root workspaces) */

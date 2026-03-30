@@ -14,6 +14,7 @@ import {
   startPermissionTimer,
   startWaitingTimer,
 } from './timerManager.js';
+import { parseTranscriptLineByType } from './transcriptParserMulti.js';
 import type { AgentState } from './types.js';
 
 export const PERMISSION_EXEMPT_TOOLS = new Set(['Task', 'Agent', 'AskUserQuestion']);
@@ -69,6 +70,20 @@ export function processTranscriptLine(
   if (!agent) return;
   agent.lastDataAt = Date.now();
   agent.linesProcessed++;
+
+  if (agent.agentType !== 'claude') {
+    processNonClaudeTranscriptLine(
+      agentId,
+      line,
+      agent,
+      agents,
+      waitingTimers,
+      permissionTimers,
+      webview,
+    );
+    return;
+  }
+
   try {
     const record = JSON.parse(line);
 
@@ -293,6 +308,74 @@ export function processTranscriptLine(
     }
   } catch {
     // Ignore malformed lines
+  }
+}
+
+function processNonClaudeTranscriptLine(
+  agentId: number,
+  line: string,
+  agent: AgentState,
+  agents: Map<number, AgentState>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+  webview: vscode.Webview | undefined,
+): void {
+  const parsed = parseTranscriptLineByType(line, agent.agentType);
+  if (!parsed) return;
+
+  if (parsed.type === 'tool_use' && parsed.toolUse) {
+    cancelWaitingTimer(agentId, waitingTimers);
+    agent.isWaiting = false;
+    agent.hadToolsInTurn = true;
+    webview?.postMessage({ type: 'agentStatus', id: agentId, status: 'active' });
+
+    const { toolId, toolName, input } = parsed.toolUse;
+    const status = formatToolStatus(toolName, input);
+    agent.activeToolIds.add(toolId);
+    agent.activeToolStatuses.set(toolId, status);
+    agent.activeToolNames.set(toolId, toolName);
+    webview?.postMessage({ type: 'agentToolStart', id: agentId, toolId, status });
+
+    if (!PERMISSION_EXEMPT_TOOLS.has(toolName)) {
+      startPermissionTimer(agentId, agents, permissionTimers, PERMISSION_EXEMPT_TOOLS, webview);
+    }
+    return;
+  }
+
+  if (parsed.type === 'tool_result' && parsed.toolResultId) {
+    const toolId = parsed.toolResultId;
+    agent.activeToolIds.delete(toolId);
+    agent.activeToolStatuses.delete(toolId);
+    agent.activeToolNames.delete(toolId);
+    setTimeout(() => {
+      webview?.postMessage({ type: 'agentToolDone', id: agentId, toolId });
+    }, TOOL_DONE_DELAY_MS);
+    if (agent.activeToolIds.size === 0) {
+      agent.hadToolsInTurn = false;
+    }
+    return;
+  }
+
+  if (parsed.type === 'turn_end') {
+    cancelWaitingTimer(agentId, waitingTimers);
+    cancelPermissionTimer(agentId, permissionTimers);
+    agent.activeToolIds.clear();
+    agent.activeToolStatuses.clear();
+    agent.activeToolNames.clear();
+    agent.activeSubagentToolIds.clear();
+    agent.activeSubagentToolNames.clear();
+    agent.isWaiting = true;
+    agent.permissionSent = false;
+    agent.hadToolsInTurn = false;
+    webview?.postMessage({ type: 'agentToolsClear', id: agentId });
+    webview?.postMessage({ type: 'agentStatus', id: agentId, status: 'waiting' });
+    return;
+  }
+
+  if (parsed.type === 'thinking' || parsed.type === 'text') {
+    if (!agent.hadToolsInTurn) {
+      startWaitingTimer(agentId, TEXT_IDLE_DELAY_MS, agents, waitingTimers, webview);
+    }
   }
 }
 

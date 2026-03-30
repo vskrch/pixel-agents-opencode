@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { detectAgentTypeFromFile } from './agentTypes.js';
 import {
   JSONL_POLL_INTERVAL_MS,
   TERMINAL_NAME_PREFIX,
@@ -104,6 +105,7 @@ export async function launchNewTerminal(
     id,
     terminalRef: terminal,
     isExternal: false,
+    agentType: 'claude',
     projectDir,
     jsonlFile: expectedFile,
     fileOffset: 0,
@@ -127,7 +129,7 @@ export async function launchNewTerminal(
   activeAgentIdRef.current = id;
   persistAgents();
   console.log(`[Pixel Agents] Agent ${id}: created for terminal ${terminal.name}`);
-  webview?.postMessage({ type: 'agentCreated', id, folderName });
+  webview?.postMessage({ type: 'agentCreated', id, folderName, agentType: agent.agentType });
 
   ensureProjectScan(
     projectDir,
@@ -244,6 +246,7 @@ export function persistAgents(
       id: agent.id,
       terminalName: agent.terminalRef?.name ?? '',
       isExternal: agent.isExternal || undefined,
+      agentType: agent.agentType,
       jsonlFile: agent.jsonlFile,
       projectDir: agent.projectDir,
       folderName: agent.folderName,
@@ -297,6 +300,7 @@ export function restoreAgents(
       id: p.id,
       terminalRef: terminal,
       isExternal,
+      agentType: p.agentType || detectAgentTypeFromFile(path.basename(p.jsonlFile)) || 'claude',
       projectDir: p.projectDir,
       jsonlFile: p.jsonlFile,
       fileOffset: 0,
@@ -460,6 +464,7 @@ export function sendExistingAgents(
   // Include folderName and isExternal per agent
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
+  const agentTypes: Record<number, string> = {};
   for (const [id, agent] of agents) {
     if (agent.folderName) {
       folderNames[id] = agent.folderName;
@@ -467,6 +472,7 @@ export function sendExistingAgents(
     if (agent.isExternal) {
       externalAgents[id] = true;
     }
+    agentTypes[id] = agent.agentType;
   }
   console.log(
     `[Pixel Agents] sendExistingAgents: agents=${JSON.stringify(agentIds)}, meta=${JSON.stringify(agentMeta)}`,
@@ -478,6 +484,7 @@ export function sendExistingAgents(
     agentMeta,
     folderNames,
     externalAgents,
+    agentTypes,
   });
 
   sendCurrentAgentStatuses(agents, webview);
